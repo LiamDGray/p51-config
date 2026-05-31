@@ -182,13 +182,13 @@ done < <(lsblk -d -n -o NAME,TYPE 2>/dev/null | awk '/disk/ && /nvme/ {print $1}
 
 # Partition drives by presence of NTFS
 NTFS_KERNELS=()
-BLANK_KERNELS=()
+CANDIDATE_KERNELS=()
 
 for dev in "${ALL_KERNELS[@]}"; do
     if has_ntfs "$dev"; then
         NTFS_KERNELS+=("$dev")
     else
-        BLANK_KERNELS+=("$dev")
+        CANDIDATE_KERNELS+=("$dev")
     fi
 done
 
@@ -207,8 +207,8 @@ if [ -n "$ARG_DEVICE" ]; then
     fi
     echo "  Explicit target: $TARGET_DEVICE"
 
-elif [ ${#BLANK_KERNELS[@]} -eq 0 ]; then
-    # ── No blank NVMe drives found ──────────────────────
+elif [ ${#CANDIDATE_KERNELS[@]} -eq 0 ]; then
+    # ── No candidate NVMe drives found ──────────────────────
     if [ ${#NTFS_KERNELS[@]} -gt 0 ]; then
         die "All NVMe drives have NTFS partitions. Cannot determine target."
     elif [ ${#ALL_KERNELS[@]} -eq 0 ]; then
@@ -217,9 +217,9 @@ elif [ ${#BLANK_KERNELS[@]} -eq 0 ]; then
         die "Cannot identify a suitable target drive. No drive has NTFS but lsblk is not reporting filesystem info. Pass the device path explicitly."
     fi
 
-elif [ ${#BLANK_KERNELS[@]} -eq 1 ]; then
+elif [ ${#CANDIDATE_KERNELS[@]} -eq 1 ]; then
     # ── Exactly one candidate — auto-select ─────────────
-    TARGET_KERNEL="${BLANK_KERNELS[0]}"
+    TARGET_KERNEL="${CANDIDATE_KERNELS[0]}"
     TARGET_DEVICE=$(to_by_id "$TARGET_KERNEL")
     echo "  Auto-selected: $TARGET_DEVICE"
 
@@ -228,7 +228,7 @@ else
     echo ""
     echo "⚠️  Multiple NVMe drives found without NTFS."
     echo "   Please specify one explicitly:"
-    for dev in "${BLANK_KERNELS[@]}"; do
+    for dev in "${CANDIDATE_KERNELS[@]}"; do
         id=$(to_by_id "$dev")
         bytes=$(drive_bytes "$dev")
         gib=$(gib_from_bytes "$bytes")
@@ -276,8 +276,8 @@ if [ ${#NTFS_KERNELS[@]} -gt 0 ]; then
     done
 fi
 
-# Also check other blank drives that aren't the target
-for other_dev in "${BLANK_KERNELS[@]}"; do
+# Also check other candidate drives that aren't the target
+for other_dev in "${CANDIDATE_KERNELS[@]}"; do
     if [ "$(realpath "$other_dev")" = "$(realpath "$TARGET_KERNEL")" ]; then
         continue
     fi
@@ -335,7 +335,7 @@ for dev in "${ALL_KERNELS[@]}"; do
     if has_ntfs "$dev"; then
         OTHER_DRIVES+=("  $id  (${gib}G, NTFS — kept untouched)")
     else
-        OTHER_DRIVES+=("  $id  (${gib}G, blank)")
+        OTHER_DRIVES+=("  $id  (${gib}G, candidate)")
     fi
 done
 
