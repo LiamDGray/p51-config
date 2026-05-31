@@ -1,184 +1,274 @@
 #!/usr/bin/env bash
-# install.sh — Install NixOS on a selected drive
+# install.sh — Install NixOS on a ThinkPad P51
 #
-# Usage (auto-detect — picks the non-NTFS NVMe drive):
-#   sudo ./install.sh
+# Auto-detects the correct NVMe drive (skips any with NTFS partitions)
+# and calculates a cryptroot partition size that will later fit on a
+# smaller mirror drive.
 #
-# Usage (explicit):
-#   sudo ./install.sh /dev/disk/by-id/nvme-Samsung_SSD_XYZ
-#   sudo ./install.sh /dev/disk/by-id/nvme-Samsung_SSD_XYZ --cryptroot-size 468G
+# Usage:
+#   sudo ./install.sh                              # auto-detect
+#   sudo ./install.sh /dev/nvme0n1                 # explicit
+#   sudo ./install.sh /dev/disk/by-id/nvme-XXX     # explicit (by-id)
 #
-# Auto-sizing: if --cryptroot-size is omitted, the script measures the
-# smallest NVMe drive and sizes cryptroot to fit on it (for future
-# RAID 1 mirror compatibility).
+# If auto-detection is ambiguous or any assumption fails, the script
+# aborts with a clear message rather than guessing.
 
 set -euo pipefail
 SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 
-# ── Helpers ────────────────────────────────────────────
-die() { echo "❌ $*" >&2; exit 1; }
-bytes_to_gib() { python3 -c "print(f'{round($1 / 1024**3, 1)}')"; }
+# ═════════════════════════════════════════════════════════
+#  Guard: prerequisites
+# ═════════════════════════════════════════════════════════
 
-# ── Detect all NVMe drives ─────────────────────────────
-# Returns array of /dev/nvmeXnY paths
-detect_nvme_drives() {
-    lsblk -d -n -o NAME,TYPE 2>/dev/null \
-        | awk '/disk/ && /nvme/ {print "/dev/"$1}'
+MISSING=""
+for cmd in lsblk readlink basename realpath python3 nix sudo; do
+    command -v "$cmd" &>/dev/null || MISSING="$MISSING $cmd"
+done
+if [ -n "$MISSING" ]; then
+    echo "❌ Missing required tools:$MISSING"
+    echo "   On the NixOS live USB, run: nix-shell -p python3"
+    exit 1
+fi
+
+if [ "$(id -u)" -ne 0 ]; then
+    echo "❌ Must be run as root (or with sudo)"
+    exit 1
+fi
+
+# Verify the flake is accessible
+DISKO_CONFIG="${SCRIPT_DIR}/hosts/p51/disko-config.nix"
+if [ ! -f "$DISKO_CONFIG" ]; then
+    echo "❌ Cannot find disko config at $DISKO_CONFIG"
+    echo "   Make sure you're running install.sh from the p51-config directory"
+    exit 1
+fi
+
+# ═════════════════════════════════════════════════════════
+#  Helpers
+# ═════════════════════════════════════════════════════════
+
+die() { echo "❌ $*" >&2; exit 1; }
+
+gib_from_bytes() {
+    local bytes="$1"
+    python3 -c "import math; g=math.floor($bytes / 1024**3); print(f'{g}')"
 }
 
-# ── Get the stable by-id path for a /dev/nvmeXnY device ──
+# Resolve an NVMe kernel device to its stable /dev/disk/by-id/ name.
+# Prefers human-readable vendor-model-serial links over EUI links.
+#
+# Returns the input unchanged if no by-id link is found (safe fallback).
 to_by_id() {
     local dev="$1"
-    # Find the nvme-* or nvme-eui.* symlink pointing to this device
-    local basename; basename=$(basename "$(realpath "$dev" 2>/dev/null)" 2>/dev/null)
-    if [ -z "$basename" ]; then
+    local kernel_dev
+    kernel_dev=$(realpath "$dev" 2>/dev/null)
+    if [ -z "$kernel_dev" ] || [ ! -b "$kernel_dev" ]; then
         echo "$dev"
         return
     fi
-    local byid
-    byid=$(readlink -f /dev/disk/by-id/nvme-* 2>/dev/null \
-        | grep "/$basename\$" | head -1)
-    if [ -n "$byid" ] && [ -b "$byid" ]; then
-        echo "$byid"
+
+    local best_eui=""
+
+    # Glob must match at least one entry, or fail
+    for link in /dev/disk/by-id/nvme-*; do
+        [ -L "$link" ] || continue
+        local target
+        target=$(readlink -f "$link" 2>/dev/null) || continue
+        if [ "$target" = "$kernel_dev" ]; then
+            # Prefer non-EUI links (human-readable)
+            if [[ "$(basename "$link")" != nvme-eui.* ]]; then
+                echo "$link"
+                return
+            fi
+            # Remember the first EUI link as fallback
+            [ -z "$best_eui" ] && best_eui="$link"
+        fi
+    done
+
+    if [ -n "$best_eui" ]; then
+        echo "$best_eui"
         return
     fi
-    # Fallback: use by-path
-    byid=$(readlink -f /dev/disk/by-path/*-nvme-* 2>/dev/null \
-        | grep "/$basename\$" | head -1)
-    if [ -n "$byid" ] && [ -b "$byid" ]; then
-        echo "$byid"
-        return
-    fi
+
+    # No by-id link found — fall back to input path
     echo "$dev"
 }
 
-# ── Check if a drive has any NTFS partitions ────────────
+# Get the kernel device (e.g. /dev/nvme0n1) from any path
+to_kernel() {
+    local dev="$1"
+    local r
+    r=$(realpath "$dev" 2>/dev/null) || true
+    if [ -n "$r" ] && [ -b "$r" ]; then
+        echo "$r"
+    else
+        echo ""
+    fi
+}
+
+# Check if a specific drive has any partitions with NTFS filesystem
 has_ntfs() {
     local dev="$1"
+    local fstype_output
+    fstype_output=$(lsblk "$dev" -n -o FSTYPE 2>/dev/null) || return 1
     local cnt
-    cnt=$(lsblk "$dev" -n -o FSTYPE 2>/dev/null | grep -ci "ntfs" || true)
+    cnt=$(echo "$fstype_output" | grep -c -i "ntfs" 2>/dev/null) || true
     [ "$cnt" -gt 0 ]
 }
 
-# ── Get drive capacity in bytes ─────────────────────────
+# Get drive capacity in bytes (raw number, no units)
 drive_bytes() {
     local dev="$1"
-    lsblk -d -b -n -o SIZE "$dev" 2>/dev/null || echo 0
-}
-
-# ── Get the actual kernel device name for a path ────────
-dev_basename() {
-    basename "$(realpath "$1" 2>/dev/null)" 2>/dev/null || basename "$1"
-}
-
-# ═════════════════════════════════════════════════════════
-#  PHASE 1: Auto-detect drives
-# ═════════════════════════════════════════════════════════
-
-echo "🔍 Scanning NVMe drives..."
-
-ALL_NVME=()
-while IFS= read -r dev; do
-    [ -n "$dev" ] && ALL_NVME+=("$dev")
-done < <(detect_nvme_drives)
-
-if [ ${#ALL_NVME[@]} -eq 0 ]; then
-    die "No NVMe drives found"
-fi
-
-NTFS_DRIVES=()
-TARGET_CANDIDATES=()
-
-for dev in "${ALL_NVME[@]}"; do
-    if has_ntfs "$dev"; then
-        NTFS_DRIVES+=("$dev")
+    local val
+    val=$(lsblk -d -b -n -o SIZE "$dev" 2>/dev/null) || true
+    if [ -z "$val" ] || [ "$val" -le 0 ] 2>/dev/null; then
+        echo "0"
     else
-        TARGET_CANDIDATES+=("$dev")
+        echo "$val"
     fi
-done
+}
 
-# ── Parse flags (before positional arg) ─────────────────
-TARGET_DEVICE=""
-CRYPTROOT_SIZE=""
+# ═════════════════════════════════════════════════════════
+#  Phase 1: Parse arguments
+# ═════════════════════════════════════════════════════════
+
+ARG_DEVICE=""
+ARG_CRYPTROOT_SIZE=""
 
 while [ $# -gt 0 ]; do
     case "$1" in
         --cryptroot-size)
-            CRYPTROOT_SIZE="$2"
+            if [ $# -lt 2 ]; then
+                die "--cryptroot-size requires an argument (e.g. '230G')"
+            fi
+            ARG_CRYPTROOT_SIZE="$2"
             shift 2
+            ;;
+        --help|-h)
+            echo "Usage: $0 [device] [--cryptroot-size SIZE]"
+            echo ""
+            echo "  device              Path to target NVMe drive (auto-detected if omitted)"
+            echo "  --cryptroot-size    Override cryptroot partition size (auto-calculated if omitted)"
+            exit 0
             ;;
         -*)
             die "Unknown option: $1"
             ;;
         *)
-            if [ -z "$TARGET_DEVICE" ]; then
-                TARGET_DEVICE="$1"
-                shift
-            else
-                die "Unexpected argument: $1"
+            if [ -n "$ARG_DEVICE" ]; then
+                die "Unexpected extra argument: $1"
             fi
+            ARG_DEVICE="$1"
+            shift
             ;;
     esac
 done
 
-# ── Select target ───────────────────────────────────────
-if [ -n "$TARGET_DEVICE" ]; then
-    # Explicit target — validate it exists
-    if [ ! -b "$TARGET_DEVICE" ]; then
-        die "$TARGET_DEVICE is not a block device"
+# ═════════════════════════════════════════════════════════
+#  Phase 2: Discover NVMe drives
+# ═════════════════════════════════════════════════════════
+
+echo "🔍 Scanning NVMe drives..."
+
+# Collect kernel device paths for ALL NVMe drives
+ALL_KERNELS=()
+while IFS= read -r line; do
+    [ -n "$line" ] || continue
+    dev="/dev/$line"
+    if [ -b "$dev" ]; then
+        ALL_KERNELS+=("$(realpath "$dev")")
+    fi
+done < <(lsblk -d -n -o NAME,TYPE 2>/dev/null | awk '/disk/ && /nvme/ {print $1}' || true)
+
+# Partition drives by presence of NTFS
+NTFS_KERNELS=()
+BLANK_KERNELS=()
+
+for dev in "${ALL_KERNELS[@]}"; do
+    if has_ntfs "$dev"; then
+        NTFS_KERNELS+=("$dev")
+    else
+        BLANK_KERNELS+=("$dev")
+    fi
+done
+
+# ═════════════════════════════════════════════════════════
+#  Phase 3: Select target drive
+# ═════════════════════════════════════════════════════════
+
+TARGET_DEVICE=""
+
+if [ -n "$ARG_DEVICE" ]; then
+    # ── Explicit target ──────────────────────────────────
+    TARGET_DEVICE=$(to_by_id "$ARG_DEVICE")
+    TARGET_KERNEL=$(to_kernel "$ARG_DEVICE")
+    if [ -z "$TARGET_KERNEL" ]; then
+        die "Device does not exist or is not a block device: $ARG_DEVICE"
     fi
     echo "  Explicit target: $TARGET_DEVICE"
+
+elif [ ${#BLANK_KERNELS[@]} -eq 0 ]; then
+    # ── No blank NVMe drives found ──────────────────────
+    if [ ${#NTFS_KERNELS[@]} -gt 0 ]; then
+        die "All NVMe drives have NTFS partitions. Cannot determine target."
+    elif [ ${#ALL_KERNELS[@]} -eq 0 ]; then
+        die "No NVMe drives found. This machine may not have NVMe, or you need to pass the device path explicitly."
+    else
+        die "Cannot identify a suitable target drive. No drive has NTFS but lsblk is not reporting filesystem info. Pass the device path explicitly."
+    fi
+
+elif [ ${#BLANK_KERNELS[@]} -eq 1 ]; then
+    # ── Exactly one candidate — auto-select ─────────────
+    TARGET_KERNEL="${BLANK_KERNELS[0]}"
+    TARGET_DEVICE=$(to_by_id "$TARGET_KERNEL")
+    echo "  Auto-selected: $TARGET_DEVICE"
+
 else
-    # Auto-detect: non-NTFS NVMe drive
-    case ${#TARGET_CANDIDATES[@]} in
-        0)
-            echo ""
-            echo "All NVMe drives have NTFS partitions. Can't determine target."
-            echo "Please specify one explicitly:"
-            for d in "${ALL_NVME[@]}"; do
-                echo "  $(to_by_id "$d")"
-            done
-            exit 1
-            ;;
-        1)
-            TARGET_DEVICE="$(to_by_id "${TARGET_CANDIDATES[0]}")"
-            echo "  Auto-selected target: $TARGET_DEVICE"
-            ;;
-        *)
-            echo ""
-            echo "Multiple NVMe drives without NTFS found. Please specify:"
-            for d in "${TARGET_CANDIDATES[@]}"; do
-                echo "  $(to_by_id "$d")"
-            done
-            exit 1
-            ;;
-    esac
+    # ── Multiple candidates — can't decide ──────────────
+    echo ""
+    echo "⚠️  Multiple NVMe drives found without NTFS."
+    echo "   Please specify one explicitly:"
+    for dev in "${BLANK_KERNELS[@]}"; do
+        id=$(to_by_id "$dev")
+        bytes=$(drive_bytes "$dev")
+        gib=$(gib_from_bytes "$bytes")
+        echo "    $id  (${gib}G)"
+    done
+    exit 1
 fi
 
-# ── Resolve to kernel device for size detection ─────────
-TARGET_KERNEL=""
-for d in "${ALL_NVME[@]}"; do
-    if [ "$(to_by_id "$d")" = "$TARGET_DEVICE" ] || [ "$d" = "$TARGET_DEVICE" ]; then
-        TARGET_KERNEL="$d"
-        break
-    fi
-done
+# ── Validate target is resolvable and is NVMe ────────────
 if [ -z "$TARGET_KERNEL" ]; then
-    # Try readlink from the by-id path
-    TARGET_KERNEL=$(readlink -f "$TARGET_DEVICE" 2>/dev/null || echo "")
-    if [ -z "$TARGET_KERNEL" ] || [ ! -b "$TARGET_KERNEL" ]; then
-        die "Cannot resolve $TARGET_DEVICE"
-    fi
+    TARGET_KERNEL=$(to_kernel "$TARGET_DEVICE")
+fi
+if [ -z "$TARGET_KERNEL" ] || [ ! -b "$TARGET_KERNEL" ]; then
+    die "Target device $TARGET_DEVICE cannot be resolved"
 fi
 
-# ── Find the constraint drive (for mirror sizing) ──────
-# The constraint is the SMALLER of the target and the NTFS drive.
-# We size cryptroot to fit on whichever is smaller.
-TARGET_BYTES=$(drive_bytes "$TARGET_KERNEL")
-CONSTRAINT_BYTES=$TARGET_BYTES  # default: target itself
+# Verify it's an NVMe drive by checking the kernel name
+TARGET_BASENAME=$(basename "$TARGET_KERNEL")
+if [[ "$TARGET_BASENAME" != nvme* ]]; then
+    die "Target $TARGET_DEVICE ($TARGET_KERNEL) does not appear to be an NVMe drive — aborting for safety"
+fi
 
-if [ ${#NTFS_DRIVES[@]} -gt 0 ]; then
-    for ntfs_dev in "${NTFS_DRIVES[@]}"; do
+TARGET_BYTES=$(drive_bytes "$TARGET_KERNEL")
+if [ "$TARGET_BYTES" -le 0 ]; then
+    die "Cannot read size of target drive $TARGET_KERNEL"
+fi
+TARGET_GIB=$(gib_from_bytes "$TARGET_BYTES")
+
+# ═════════════════════════════════════════════════════════
+#  Phase 4: Calculate cryptroot size
+# ═════════════════════════════════════════════════════════
+
+# The constraint is the SMALLER drive. cryptroot will be sized to fit
+# on whichever is smallest — either the target itself, or the NTFS
+# drive that might become a mirror member later.
+
+CONSTRAINT_BYTES=$TARGET_BYTES
+
+if [ ${#NTFS_KERNELS[@]} -gt 0 ]; then
+    for ntfs_dev in "${NTFS_KERNELS[@]}"; do
         ntfs_bytes=$(drive_bytes "$ntfs_dev")
         if [ "$ntfs_bytes" -gt 0 ] && [ "$ntfs_bytes" -lt "$CONSTRAINT_BYTES" ]; then
             CONSTRAINT_BYTES=$ntfs_bytes
@@ -186,65 +276,81 @@ if [ ${#NTFS_DRIVES[@]} -gt 0 ]; then
     done
 fi
 
-# ═════════════════════════════════════════════════════════
-#  PHASE 2: Calculate cryptroot size
-# ═════════════════════════════════════════════════════════
+# Also check other blank drives that aren't the target
+for other_dev in "${BLANK_KERNELS[@]}"; do
+    if [ "$(realpath "$other_dev")" = "$(realpath "$TARGET_KERNEL")" ]; then
+        continue
+    fi
+    other_bytes=$(drive_bytes "$other_dev")
+    if [ "$other_bytes" -gt 0 ] && [ "$other_bytes" -lt "$CONSTRAINT_BYTES" ]; then
+        CONSTRAINT_BYTES=$other_bytes
+    fi
+done
 
-TARGET_GIB=$(bytes_to_gib "$TARGET_BYTES")
-CONSTRAINT_GIB=$(bytes_to_gib "$CONSTRAINT_BYTES")
+CONSTRAINT_GIB=$(gib_from_bytes "$CONSTRAINT_BYTES")
 
-if [ -z "$CRYPTROOT_SIZE" ]; then
-    if [ "$CONSTRAINT_BYTES" -lt "$TARGET_BYTES" ]; then
-        # Target is bigger than constraint → limit cryptroot
-        # ESP=0.5G, swap=8G → usable = constraint - 8.5G in GiB
-        USABLE_GIB=$(python3 -c "
+if [ -n "$ARG_CRYPTROOT_SIZE" ]; then
+    # User supplied an explicit size — trust it
+    CRYPTROOT_SIZE="$ARG_CRYPTROOT_SIZE"
+    echo "  cryptroot: $CRYPTROOT_SIZE (explicit)"
+
+elif [ "$CONSTRAINT_BYTES" -lt "$TARGET_BYTES" ]; then
+    # Target is not the smallest drive → limit cryptroot to fit the smaller one
+    # ESP = 0.5 GiB, swap = 8 GiB → 8.5 GiB overhead
+    FLOOR_GIB=$(python3 -c "
 import math
 usable = $CONSTRAINT_BYTES / 1024**3 - 8.5
-# Round down to nearest whole GiB
-usable = math.floor(usable)
-print(f'{usable}G')
-")
-        CRYPTROOT_SIZE="$USABLE_GIB"
-        echo ""
-        echo "  ⚖️  Target: ${TARGET_GIB}G  |  Constraint (smaller drive): ${CONSTRAINT_GIB}G"
-        echo "  📐 cryptroot sized to ${CRYPTROOT_SIZE} (fits both drives for future mirror)"
-    else
-        CRYPTROOT_SIZE="100%"
-        echo ""
-        echo "  ⚖️  Target: ${TARGET_GIB}G  |  Target is the smallest drive"
-        echo "  📐 cryptroot set to 100% of remaining space"
-    fi
+usable = max(4, math.floor(usable))
+print(usable)
+" 2>/dev/null) || die "Failed to calculate cryptroot size"
+
+    CRYPTROOT_SIZE="${FLOOR_GIB}G"
+    echo "  📐 cryptroot: $CRYPTROOT_SIZE (limited to fit ${CONSTRAINT_GIB}G constraint drive)"
+else
+    CRYPTROOT_SIZE="100%"
+    echo "  📐 cryptroot: 100% (target is the smallest drive)"
 fi
 
 # ═════════════════════════════════════════════════════════
-#  PHASE 3: Confirmation
+#  Phase 5: Summary & confirmation
 # ═════════════════════════════════════════════════════════
 
 echo ""
 echo "═══════════════════════════════════════════════"
-echo "  Target drive:  $TARGET_DEVICE  (${TARGET_GIB}G)"
-echo "  cryptroot:     $CRYPTROOT_SIZE"
-echo "  Config:        $SCRIPT_DIR"
+echo "  Target:   $TARGET_DEVICE"
+echo "  Size:     ${TARGET_GIB}G"
+echo "  cryptroot: $CRYPTROOT_SIZE"
+echo ""
+lsblk "$TARGET_KERNEL" -o NAME,SIZE,FSTYPE,LABEL 2>/dev/null || true
 echo ""
 
-lsblk "$(realpath "$TARGET_KERNEL")" -o NAME,SIZE,FSTYPE,LABEL 2>/dev/null || true
-echo ""
-
-echo "  Other drives detected:"
-for d in "${ALL_NVME[@]}"; do
-    id="$(to_by_id "$d")"
-    if [ "$id" != "$TARGET_DEVICE" ] && [ "$d" != "$TARGET_DEVICE" ]; then
-        bytes=$(drive_bytes "$d")
-        gib=$(bytes_to_gib "$bytes")
-        echo "    $id  (${gib}G)"
+OTHER_DRIVES=()
+for dev in "${ALL_KERNELS[@]}"; do
+    if [ "$(realpath "$dev")" = "$(realpath "$TARGET_KERNEL")" ]; then
+        continue
+    fi
+    id=$(to_by_id "$dev")
+    bytes=$(drive_bytes "$dev")
+    gib=$(gib_from_bytes "$bytes")
+    if has_ntfs "$dev"; then
+        OTHER_DRIVES+=("  $id  (${gib}G, NTFS — kept untouched)")
+    else
+        OTHER_DRIVES+=("  $id  (${gib}G, blank)")
     fi
 done
+
+if [ ${#OTHER_DRIVES[@]} -gt 0 ]; then
+    echo "  Other drives:"
+    for d in "${OTHER_DRIVES[@]}"; do
+        echo "    $d"
+    done
+fi
 echo "═══════════════════════════════════════════════"
 
 if [ "$CRYPTROOT_SIZE" != "100%" ]; then
     echo ""
-    echo "⚠️  cryptroot limited to $CRYPTROOT_SIZE for mirror compatibility"
-    echo "   ${CONSTRAINT_GIB}G is the smallest drive that future pool members must fit on."
+    echo "⚠️  cryptroot limited to $CRYPTROOT_SIZE"
+    echo "   Future mirror members can be up to ${CONSTRAINT_GIB}G (the smallest drive)."
 fi
 echo ""
 read -rp "⚠️  This will DESTROY ALL DATA on the target drive. Continue? [y/N] " CONFIRM
@@ -254,10 +360,10 @@ if [ "$CONFIRM" != "y" ]; then
 fi
 
 # ═════════════════════════════════════════════════════════
-#  PHASE 4: Run disko
+#  Phase 6: Build temporary disko config
 # ═════════════════════════════════════════════════════════
 
-DISKO_NIX=$(mktemp /tmp/disko-config.XXXXXX.nix)
+DISKO_NIX=$(mktemp /tmp/disko-config.XXXXXX.nix) || die "Failed to create temp file"
 cleanup() { rm -f "$DISKO_NIX"; }
 trap cleanup EXIT
 
@@ -273,25 +379,40 @@ cat > "$DISKO_NIX" << EOF
 }
 EOF
 
+# ═════════════════════════════════════════════════════════
+#  Phase 7: Disko — partition, LUKS, ZFS
+# ═════════════════════════════════════════════════════════
+
 echo ""
-echo "💿 Partitioning, encrypting, and creating ZFS pool..."
-sudo nix run github:nix-community/disko -- --mode disko "$DISKO_NIX"
+echo "💿 Running disko (partition, LUKS encrypt, ZFS pool)..."
+sudo nix run github:nix-community/disko -- --mode disko "$DISKO_NIX" \
+    || die "disko failed — check the error above"
+
+# Verify /mnt was created
+if [ ! -d "/mnt" ] || [ ! -d "/mnt/nix" ]; then
+    die "/mnt/nix does not exist — disko may not have mounted the pool"
+fi
 
 # ═════════════════════════════════════════════════════════
-#  PHASE 5: Install NixOS
+#  Phase 8: NixOS install
 # ═════════════════════════════════════════════════════════
 
 echo ""
 echo "📦 Installing NixOS..."
-sudo nixos-install --flake "$SCRIPT_DIR#p51" --root /mnt
+sudo nixos-install --flake "$SCRIPT_DIR#p51" --root /mnt \
+    || die "nixos-install failed"
+
+# ═════════════════════════════════════════════════════════
+#  Done
+# ═════════════════════════════════════════════════════════
 
 echo ""
-echo "✅ Done!"
+echo "✅ Install complete!"
 echo ""
 echo "   Next steps:"
 echo "   ─────────────────────────────────────────────"
-echo "   1. sudo passwd liam"
-echo "   2. sudo reboot"
+echo "   1. Set your password:  sudo passwd liam"
+echo "   2. Reboot:             sudo reboot"
 echo "   ─────────────────────────────────────────────"
 echo ""
 echo "   After reboot, update hosts/p51/default.nix:"
