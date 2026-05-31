@@ -61,8 +61,16 @@ cd p51-config
 ### Install
 
 ```bash
+# (optional) Check both drives — note the smaller one's capacity
+lsblk -o NAME,SIZE,MODEL,SERIAL,TYPE
+# Smaller drive shows e.g. 476.9G → cryptroot can be at most ~468G
+
 # Run the install script with YOUR chosen device
+# Without size limit (will use 100% of this drive):
 sudo ./install.sh /dev/disk/by-id/nvme-SAMSUNG_MZVLB512_XXXXXXXX
+
+# WITH size limit (ensures mirror fits on a smaller drive later):
+sudo ./install.sh /dev/disk/by-id/nvme-SAMSUNG_MZVLB1T_XXXXXXXX --cryptroot-size 468G
 
 # The script will:
 #   1. Show you the drive and ask for confirmation
@@ -71,7 +79,22 @@ sudo ./install.sh /dev/disk/by-id/nvme-SAMSUNG_MZVLB512_XXXXXXXX
 #   4. Tell you to set a password and reboot
 ```
 
-## Post-install
+### Calculating `--cryptroot-size` for future mirror compatibility
+
+```
+smaller_drive_raw_gib - 0.5G (ESP) - 8G (swap) = safe cryptroot size
+
+Example: 512GB drive → 476.9 - 0.5 - 8 ≈ 468G
+Example: 256GB drive → 238.5 - 0.5 - 8 ≈ 230G
+```
+
+If the target drive is **bigger** than the other drive, you **must** use `--cryptroot-size` so the partitions fit on both. If they're the same size, you can omit it (defaults to `"100%"`).
+
+### After install
+
+Update `hosts/p51/default.nix` to:
+- Set `diskDevice` to the actual device path
+- Set `cryptrootSize` to match what you used (or leave unset if `"100%"`)
 
 ```bash
 # Set user password (user 'liam' created without one)

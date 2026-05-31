@@ -1,4 +1,4 @@
-{ diskDevice, ... }:
+{ diskDevice, cryptrootSize ? "100%", ... }:
 
 {
   disko.devices = {
@@ -37,7 +37,7 @@
             };
             cryptroot = {
               name = "cryptroot";
-              size = "100%";
+              size = cryptrootSize;
               content = {
                 type = "luks";
                 name = "cryptroot";
@@ -61,8 +61,10 @@
       # When you add a second NVMe:
       #   1. Uncomment this disk block
       #   2. Set its device path
-      #   3. Set zpool.zroot.mode = "mirror"
-      #   4. Run: zpool attach zroot /dev/disk/by-id/<nvme0-cryptroot> /dev/disk/by-id/<nvme1-cryptroot>
+      #   3. Set cryptroot size to match the size you installed with:
+      #      size = "<same-cryptrootSize-as-install>"
+      #   4. Set zpool.zroot.mode = "mirror"
+      #   5. Run: zpool attach zroot /dev/disk/by-id/<nvme0-cryptroot> /dev/disk/by-id/<nvme1-cryptroot>
       #
       # nvme1 = {
       #   type = "disk";

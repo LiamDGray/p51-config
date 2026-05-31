@@ -9,13 +9,19 @@
     #  which overrides this automatically.
     #
     #  If you're rebuilding after install (nixos-rebuild switch),
-    #  update this to your actual NVMe by-id path.
+    #  update diskDevice to your actual NVMe by-id path.
     #
-    #  Find it with: lsblk -o NAME,SIZE,MODEL,SERIAL
+    #  If you used --cryptroot-size during install, also set
+    #  cryptrootSize here to match, so future rebuilds preserve
+    #  the same partition sizing.
+    #
+    #  Find your drive: lsblk -o NAME,SIZE,MODEL,SERIAL
     # ═══════════════════════════════════════════════════════════
     (import ./disko-config.nix {
       # ⚠️  REPLACE THIS with your NVMe device by-id
       diskDevice = "/dev/disk/by-id/nvme-CHANGE_THIS_TO_YOUR_DRIVE";
+      # If you used --cryptroot-size during install, set it here:
+      # cryptrootSize = "468G";
     })
     ./hardware.nix
 
