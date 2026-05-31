@@ -2,13 +2,13 @@
 
 **ZFS + LUKS + impermanence**
 
-## Partition layout
+## Partition layout (on the target drive)
 
 ```
-nvme0n1 (1 TB, later RAID 1 via zpool attach)
+nvmeZnZ (target drive — smaller of the two)
 ├── p1  ESP         512 MB  FAT32    /boot           — UEFI, unencrypted
 ├── p2  cryptswap    8 GB   LUKS2   /dev/mapper/…   — random key, no resume
-└── p3  cryptroot   ~992 GB LUKS2   zroot (ZFS)     — everything else
+└── p3  cryptroot   rest    LUKS2   zroot (ZFS)     — everything else
 
 zroot (compression=lz4, atime=off)
 ├── safe                      — container for auto-snapshotted datasets
@@ -18,28 +18,57 @@ zroot (compression=lz4, atime=off)
 │   └── safe/cache     → /var/cache  — persistent caches
 ```
 
-## Pre-install (on live USB)
+**The root partition adapts to your drive.** `cryptroot` is set to `"100%"` of remaining space after ESP (512M) and swap (8G). Whichever drive you pick, it fills the space available, so the smaller drive is never a problem.
+
+## Drive selection — safety
+
+The P51 has **two NVMe drives**. The install script (`install.sh`) forces you to pick one explicitly — it will **never** touch a drive you don't name.
 
 ```bash
-# 1. Boot NixOS minimal ISO, get internet
+# Boot NixOS live USB
+# Get internet (if using git)
 iwctl station wlan0 connect "SSID"
 
-# 2. Clone this config
-nix shell nixpkgs#git -c git clone https://github.com/your-org/p51-config
+# Identify BOTH drives
+lsblk -o NAME,SIZE,MODEL,SERIAL,TYPE
+
+# You'll see something like:
+# nvme0n1  256G SAMSUNG MZVLB256 ...  ← your existing system drive
+# nvme1n1  512G SAMSUNG MZVLB512 ...  ← acceptable target (smaller)
+
+# Pick the small one. Then:
+```
+
+### Getting the config onto the live system
+
+**Option A — second USB stick** (no internet needed)
+```bash
+# On the T430s:
+cp -r /home/liam/src/p51-config /path/to/usb/
+
+# On the P51 live USB:
+mount /dev/sdb1 /mnt/usb
+cd /mnt/usb/p51-config
+```
+
+**Option B — internet** (push to a git host first)
+```bash
+nix-shell -p git
+git clone <url> p51-config
 cd p51-config
+```
 
-# 3. Identify your disk
-lsblk -o NAME,SIZE,MODEL,SERIAL
+### Install
 
-# 4. Update the disk device in hosts/p51/default.nix
-#    Set diskDevice to your NVMe by-id path, e.g.:
-#      diskDevice = "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_SERIAL";
+```bash
+# Run the install script with YOUR chosen device
+sudo ./install.sh /dev/disk/by-id/nvme-SAMSUNG_MZVLB512_XXXXXXXX
 
-# 5. Run disko — partitions, LUKS, ZFS pool, all datasets
-sudo nix run github:nix-community/disko -- --flake .#p51
-
-# 6. Install
-sudo nixos-install --flake .#p51
+# The script will:
+#   1. Show you the drive and ask for confirmation
+#   2. Run disko (partition, LUKS encrypt, ZFS pool)
+#   3. Install NixOS
+#   4. Tell you to set a password and reboot
 ```
 
 ## Post-install
@@ -48,23 +77,20 @@ sudo nixos-install --flake .#p51
 # Set user password (user 'liam' created without one)
 sudo passwd liam
 
-# Reboot into your new system
+# Reboot into your new system — disconnect the live USB
 sudo reboot
 ```
 
 ## Adding a second NVMe (RAID 1 mirror)
 
-1. Install the second drive
-2. `lsblk` to identify it
-3. Partition it with the same GPT layout (ESP + LUKS)
-4. `zpool attach zroot /dev/disk/by-id/<nvme0-cryptroot> /dev/disk/by-id/<nvme1-cryptroot>`
-5. Uncomment the `nvme1` disk block in `hosts/p51/disko-config.nix`
-6. Set `disk.mode = "mirror"` in the zpool config
-7. Update and rebuild: `sudo nixos-rebuild switch`
+When you add a drive to mirror to:
 
-## Setting the LUKS password
+1. Boot the installed system
+2. `lsblk` to identify the new drive
+3. Partition it manually or with a one-shot disko run for that drive
+4. `zpool attach zroot /dev/disk/by-id/<current-cryptroot> /dev/disk/by-id/<new-cryptroot>`
 
-During step 5 (disko), you'll be prompted for the LUKS password. Choose a strong one — it unlocks `cryptroot` on every boot.
+The ESP on the second drive can be kept as a manual backup — just copy the boot files after the mirror is set up.
 
 ## Customizing
 
@@ -72,7 +98,12 @@ During step 5 (disko), you'll be prompted for the LUKS password. Choose a strong
 |---|---|
 | `hosts/p51/disko-config.nix` | Partition sizes, ZFS dataset layout |
 | `hosts/p51/hardware.nix` | GPU driver, kernel version, modules |
+| `hosts/p51/default.nix` | Device path (after install), hostId |
 | `modules/users.nix` | SSH keys, extra users |
 | `modules/impermanence.nix` | Which paths survive reboots |
 | `modules/networking.nix` | Firewall rules, DNS |
 | `modules/services.nix` | Enabled system services |
+
+**⚠️ The install script (`install.sh`) injects the device path at runtime.**  
+You don't need to edit `hosts/p51/default.nix` before installing.  
+The device path in `default.nix` is only used for `nixos-rebuild` after installation — update it then if needed.

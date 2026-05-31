@@ -40,10 +40,5 @@
         ./hosts/p51
       ];
     };
-
-    # Separate disko output so `nix run github:nix-community/disko -- --flake .#p51` works
-    diskoConfigurations.p51 = import ./hosts/p51/disko-config.nix {
-      diskDevice = "/dev/disk/by-id/nvme-Samsung_SSD_990_PRO_1TB"; # ⚠️ set this
-    };
   };
 }
