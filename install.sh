@@ -54,15 +54,15 @@ gib_from_bytes() {
     python3 -c "import math; g=math.floor($bytes / 1024**3); print(f'{g}')"
 }
 
-# Resolve an NVMe kernel device to its stable /dev/disk/by-id/ name.
+# Resolve an NVMe disk device to its stable /dev/disk/by-id/ name.
 # Prefers human-readable vendor-model-serial links over EUI links.
 #
 # Returns the input unchanged if no by-id link is found (safe fallback).
 to_by_id() {
     local dev="$1"
-    local kernel_dev
-    kernel_dev=$(realpath "$dev" 2>/dev/null)
-    if [ -z "$kernel_dev" ] || [ ! -b "$kernel_dev" ]; then
+    local real_disk
+    real_disk=$(realpath "$dev" 2>/dev/null)
+    if [ -z "$real_disk" ] || [ ! -b "$real_disk" ]; then
         echo "$dev"
         return
     fi
@@ -74,7 +74,7 @@ to_by_id() {
         [ -L "$link" ] || continue
         local target
         target=$(readlink -f "$link" 2>/dev/null) || continue
-        if [ "$target" = "$kernel_dev" ]; then
+        if [ "$target" = "$real_disk"]; then
             # Prefer non-EUI links (human-readable)
             if [[ "$(basename "$link")" != nvme-eui.* ]]; then
                 echo "$link"
@@ -94,8 +94,8 @@ to_by_id() {
     echo "$dev"
 }
 
-# Get the kernel device (e.g. /dev/nvme0n1) from any path
-to_kernel() {
+# Get the disk device path (e.g. /dev/nvme0n1) from any path
+to_disk_device() {
     local dev="$1"
     local r
     r=$(realpath "$dev" 2>/dev/null) || true
@@ -170,25 +170,25 @@ done
 
 echo "🔍 Scanning NVMe drives..."
 
-# Collect kernel device paths for ALL NVMe drives
-ALL_KERNELS=()
+# Collect all NVMe disk device paths
+ALL_DISKS=()
 while IFS= read -r line; do
     [ -n "$line" ] || continue
     dev="/dev/$line"
     if [ -b "$dev" ]; then
-        ALL_KERNELS+=("$(realpath "$dev")")
+        ALL_DISKS+=("$(realpath "$dev")")
     fi
 done < <(lsblk -d -n -o NAME,TYPE 2>/dev/null | awk '/disk/ && /nvme/ {print $1}' || true)
 
 # Partition drives by presence of NTFS
-NTFS_KERNELS=()
-CANDIDATE_KERNELS=()
+NTFS_DISKS=()
+CANDIDATE_DISKS=()
 
-for dev in "${ALL_KERNELS[@]}"; do
+for dev in "${ALL_DISKS[@]}"; do
     if has_ntfs "$dev"; then
-        NTFS_KERNELS+=("$dev")
+        NTFS_DISKS+=("$dev")
     else
-        CANDIDATE_KERNELS+=("$dev")
+        CANDIDATE_DISKS+=("$dev")
     fi
 done
 
@@ -201,26 +201,26 @@ TARGET_DEVICE=""
 if [ -n "$ARG_DEVICE" ]; then
     # ── Explicit target ──────────────────────────────────
     TARGET_DEVICE=$(to_by_id "$ARG_DEVICE")
-    TARGET_KERNEL=$(to_kernel "$ARG_DEVICE")
-    if [ -z "$TARGET_KERNEL" ]; then
+    TARGET_DISK=$(to_disk_device "$ARG_DEVICE")
+    if [ -z "$TARGET_DISK" ]; then
         die "Device does not exist or is not a block device: $ARG_DEVICE"
     fi
     echo "  Explicit target: $TARGET_DEVICE"
 
-elif [ ${#CANDIDATE_KERNELS[@]} -eq 0 ]; then
+elif [ ${#CANDIDATE_DISKS[@]} -eq 0 ]; then
     # ── No candidate NVMe drives found ──────────────────────
-    if [ ${#NTFS_KERNELS[@]} -gt 0 ]; then
+    if [ ${#NTFS_DISKS[@]} -gt 0 ]; then
         die "All NVMe drives have NTFS partitions. Cannot determine target."
-    elif [ ${#ALL_KERNELS[@]} -eq 0 ]; then
+    elif [ ${#ALL_DISKS[@]} -eq 0 ]; then
         die "No NVMe drives found. This machine may not have NVMe, or you need to pass the device path explicitly."
     else
         die "Cannot identify a suitable target drive. No drive has NTFS but lsblk is not reporting filesystem info. Pass the device path explicitly."
     fi
 
-elif [ ${#CANDIDATE_KERNELS[@]} -eq 1 ]; then
+elif [ ${#CANDIDATE_DISKS[@]} -eq 1 ]; then
     # ── Exactly one candidate — auto-select ─────────────
-    TARGET_KERNEL="${CANDIDATE_KERNELS[0]}"
-    TARGET_DEVICE=$(to_by_id "$TARGET_KERNEL")
+    TARGET_DISK="${CANDIDATE_DISKS[0]}"
+    TARGET_DEVICE=$(to_by_id "$TARGET_DISK")
     echo "  Auto-selected: $TARGET_DEVICE"
 
 else
@@ -228,7 +228,7 @@ else
     echo ""
     echo "⚠️  Multiple NVMe drives found without NTFS."
     echo "   Please specify one explicitly:"
-    for dev in "${CANDIDATE_KERNELS[@]}"; do
+    for dev in "${CANDIDATE_DISKS[@]}"; do
         id=$(to_by_id "$dev")
         bytes=$(drive_bytes "$dev")
         gib=$(gib_from_bytes "$bytes")
@@ -238,22 +238,22 @@ else
 fi
 
 # ── Validate target is resolvable and is NVMe ────────────
-if [ -z "$TARGET_KERNEL" ]; then
-    TARGET_KERNEL=$(to_kernel "$TARGET_DEVICE")
+if [ -z "$TARGET_DISK" ]; then
+    TARGET_DISK=$(to_disk_device "$TARGET_DEVICE")
 fi
-if [ -z "$TARGET_KERNEL" ] || [ ! -b "$TARGET_KERNEL" ]; then
+if [ -z "$TARGET_DISK" ] || [ ! -b "$TARGET_DISK" ]; then
     die "Target device $TARGET_DEVICE cannot be resolved"
 fi
 
-# Verify it's an NVMe drive by checking the kernel name
-TARGET_BASENAME=$(basename "$TARGET_KERNEL")
-if [[ "$TARGET_BASENAME" != nvme* ]]; then
-    die "Target $TARGET_DEVICE ($TARGET_KERNEL) does not appear to be an NVMe drive — aborting for safety"
+# Verify it's an NVMe drive by checking the device name
+TARGET_DISK_NAME=$(basename "$TARGET_DISK")
+if [[ "$TARGET_DISK_NAME" != nvme* ]]; then
+    die "Target $TARGET_DEVICE ($TARGET_DISK) does not appear to be an NVMe drive — aborting for safety"
 fi
 
-TARGET_BYTES=$(drive_bytes "$TARGET_KERNEL")
+TARGET_BYTES=$(drive_bytes "$TARGET_DISK")
 if [ "$TARGET_BYTES" -le 0 ]; then
-    die "Cannot read size of target drive $TARGET_KERNEL"
+    die "Cannot read size of target drive $TARGET_DISK"
 fi
 TARGET_GIB=$(gib_from_bytes "$TARGET_BYTES")
 
@@ -267,8 +267,8 @@ TARGET_GIB=$(gib_from_bytes "$TARGET_BYTES")
 
 CONSTRAINT_BYTES=$TARGET_BYTES
 
-if [ ${#NTFS_KERNELS[@]} -gt 0 ]; then
-    for ntfs_dev in "${NTFS_KERNELS[@]}"; do
+if [ ${#NTFS_DISKS[@]} -gt 0 ]; then
+    for ntfs_dev in "${NTFS_DISKS[@]}"; do
         ntfs_bytes=$(drive_bytes "$ntfs_dev")
         if [ "$ntfs_bytes" -gt 0 ] && [ "$ntfs_bytes" -lt "$CONSTRAINT_BYTES" ]; then
             CONSTRAINT_BYTES=$ntfs_bytes
@@ -277,8 +277,8 @@ if [ ${#NTFS_KERNELS[@]} -gt 0 ]; then
 fi
 
 # Also check other candidate drives that aren't the target
-for other_dev in "${CANDIDATE_KERNELS[@]}"; do
-    if [ "$(realpath "$other_dev")" = "$(realpath "$TARGET_KERNEL")" ]; then
+for other_dev in "${CANDIDATE_DISKS[@]}"; do
+    if [ "$(realpath "$other_dev")" = "$(realpath "$TARGET_DISK")" ]; then
         continue
     fi
     other_bytes=$(drive_bytes "$other_dev")
@@ -321,12 +321,12 @@ echo "  Target:   $TARGET_DEVICE"
 echo "  Size:     ${TARGET_GIB}G"
 echo "  cryptroot: $CRYPTROOT_SIZE"
 echo ""
-lsblk "$TARGET_KERNEL" -o NAME,SIZE,FSTYPE,LABEL 2>/dev/null || true
+lsblk "$TARGET_DISK" -o NAME,SIZE,FSTYPE,LABEL 2>/dev/null || true
 echo ""
 
 OTHER_DRIVES=()
-for dev in "${ALL_KERNELS[@]}"; do
-    if [ "$(realpath "$dev")" = "$(realpath "$TARGET_KERNEL")" ]; then
+for dev in "${ALL_DISKS[@]}"; do
+    if [ "$(realpath "$dev")" = "$(realpath "$TARGET_DISK")" ]; then
         continue
     fi
     id=$(to_by_id "$dev")
