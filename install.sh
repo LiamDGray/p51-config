@@ -488,7 +488,7 @@ export NIX_CONFIG
 sudo NIX_CONFIG="$NIX_CONFIG" nix run github:nix-community/nixos-anywhere -- \
     --flake "$TMP_FLAKE#p51" \
     --extra-files "$EXTRA_DIR" \
-    --ssh-key "$SSH_KEY" \
+    -i "$SSH_KEY" \
     --target-host root@localhost \
     --phases disko,install \
     2>&1 || die "nixos-anywhere failed"
