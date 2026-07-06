@@ -18,8 +18,8 @@
   ];
 
   # ── Kernel & modules ──────────────────────────────
-  boot.kernelPackages = lib.mkDefault pkgs.linuxPackages_latest;
-
+  # ZFS 2.2.x in nixos-24.11 doesn't support the latest kernel.
+  # We use the default stable kernel for compatibility.
   boot.initrd.availableKernelModules = [
     "nvme" "xhci_pci" "usbhid" "usb_storage" "sd_mod"
     "rtsx_pci_sdmmc" "thunderbolt"
