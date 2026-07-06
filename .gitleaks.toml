@@ -1,0 +1,17 @@
+# ═══════════════════════════════════════════════════════════════
+#  Gitleaks config — p51-config
+# ═══════════════════════════════════════════════════════════════
+#  Allow known non-secret patterns specific to this repo.
+# ═══════════════════════════════════════════════════════════════
+
+title = "p51-config gitleaks config"
+
+[allowlist]
+description = "Placeholder/template values in p51-config — not real secrets"
+regexes = [
+    '''CHANGE_THIS_TO_YOUR_DRIVE''',
+    '''REPLACE_ME''',
+    '''ssh-ed25519 AAA''',
+    '''Add your public SSH key''',
+    '''deadbeef''',
+]

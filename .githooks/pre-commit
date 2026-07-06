@@ -1,0 +1,13 @@
+#!/usr/bin/env bash
+# p51-config pre-commit hook — secrets scan via gitleaks
+# Installed via .githooks/ directory (core.hooksPath)
+set -euo pipefail
+
+if ! command -v gitleaks &>/dev/null; then
+    echo "⚠️  gitleaks not found — secrets scan skipped"
+    echo "   Install:  nix-shell -p gitleaks"
+    echo "   Or:       brew install gitleaks"
+    exit 0
+fi
+
+exec gitleaks protect --staged --verbose --config .gitleaks.toml 2>&1

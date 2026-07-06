@@ -25,12 +25,14 @@
     })
     ./hardware.nix
 
+    ../../modules/desktop.nix
     ../../modules/core.nix
     ../../modules/boot.nix
     ../../modules/networking.nix
     ../../modules/services.nix
     ../../modules/users.nix
     ../../modules/impermanence.nix
+    ../../modules/backups.nix
   ];
 
   # ── Hostname ───────────────────────────────────────

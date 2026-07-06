@@ -96,6 +96,62 @@ drive_bytes() {
 }
 
 # ═════════════════════════════════════════════════════════
+#  Drive inventory display
+# ═════════════════════════════════════════════════════════
+
+show_drive_inventory() {
+    local smallest_bytes=9999999999999999
+    local smallest_dev=""
+
+    for dev in "${ALL_DISKS[@]}"; do
+        local bytes
+        bytes=$(drive_bytes "$dev")
+        [ "$bytes" -lt "$smallest_bytes" ] && { smallest_bytes=$bytes; smallest_dev="$dev"; }
+    done
+
+    echo ""
+    echo "┌─ NVMe Drive Inventory ─────────────────────────────────────────────────────┐"
+    printf "│ %-12s %7s  %-30s %-5s %s │\n" "DEVICE" "SIZE" "MODEL" "NTFS?" "PARTITIONS"
+    echo "├────────────────────────────────────────────────────────────────────────────┤"
+
+    for dev in "${ALL_DISKS[@]}"; do
+        local name size_gib model ntfs parts note
+        name=$(basename "$dev")
+        size_gib=$(gib_from_bytes "$(drive_bytes "$dev")")G
+        model=$(lsblk -d -n -o MODEL "$dev" 2>/dev/null | head -c 28)
+        has_ntfs "$dev" && ntfs="YES" || ntfs="no"
+
+        # Build partition summary (list child partitions and their fstypes)
+        parts=""
+        while IFS= read -r line; do
+            local pname pfstype
+            pname=$(echo "$line" | awk '{print $1}')
+            pfstype=$(echo "$line" | awk '{print $2}')
+            pname="${pname#$name}"
+            [ -n "$parts" ] && parts="$parts, "
+            parts="${parts}${pname}:${pfstype:-?}"
+        done < <(lsblk "$dev" -n -o NAME,FSTYPE 2>/dev/null | grep -v "^$name ")
+        [ -z "$parts" ] && parts="(blank)"
+
+        note=""
+        [ "$dev" = "$smallest_dev" ] && note=" ← smallest"
+
+        printf "│ %-12s %6s  %-30s %-5s %s%s │\n" "/dev/$name" "$size_gib" "$model" "$ntfs" "$parts" "$note"
+    done
+    echo "└────────────────────────────────────────────────────────────────────────────┘"
+
+    if [ -n "$smallest_dev" ]; then
+        local smallest_gib safe_max
+        smallest_gib=$(gib_from_bytes "$smallest_bytes")
+        safe_max=$((smallest_gib - 9))
+        echo ""
+        echo "  Smallest: $(basename "$smallest_dev") (${smallest_gib}G) → mirror-safe cryptroot ≤ ${safe_max}G"
+        echo "  (${smallest_gib}G − 0.5G ESP − 8G swap − rounding)"
+        echo ""
+    fi
+}
+
+# ═════════════════════════════════════════════════════════
 #  Phase 1: Parse arguments
 # ═════════════════════════════════════════════════════════
 
@@ -142,6 +198,9 @@ CANDIDATE_DISKS=()
 for dev in "${ALL_DISKS[@]}"; do
     has_ntfs "$dev" && NTFS_DISKS+=("$dev") || CANDIDATE_DISKS+=("$dev")
 done
+
+# ── Show drive inventory ──────────────────────────────
+show_drive_inventory
 
 # ═════════════════════════════════════════════════════════
 #  Phase 3: Select target drive
@@ -247,8 +306,21 @@ for dev in "${ALL_DISKS[@]}"; do
         || OTHER_DRIVES+=("  $id  (${gib}G, candidate)")
 done
 [ ${#OTHER_DRIVES[@]} -gt 0 ] && echo "  Other drives:" && for d in "${OTHER_DRIVES[@]}"; do echo "    $d"; done
+
+# Mirror compatibility note
+if [ "$CRYPTROOT_SIZE" != "100%" ]; then
+    echo "  ───────────────────────────────────────────────"
+    echo "  ⚠️  cryptroot limited to $CRYPTROOT_SIZE"
+    echo "     (mirror-friendly — fits on smallest ${CONSTRAINT_GIB}G drive)"
+else
+    echo "  ───────────────────────────────────────────────"
+    echo "  💡 cryptroot uses 100% of remaining space"
+    if [ "${#NTFS_DISKS[@]}" -gt 0 ] || [ "${#CANDIDATE_DISKS[@]}" -gt 1 ]; then
+        echo "     To mirror to a smaller drive later, re-run with:"
+        echo "     --cryptroot-size <size>G"
+    fi
+fi
 echo "═══════════════════════════════════════════════"
-[ "$CRYPTROOT_SIZE" != "100%" ] && echo "  ⚠️  Limited to $CRYPTROOT_SIZE for mirror (up to ${CONSTRAINT_GIB}G)"
 echo ""
 read -rp "⚠️  This will DESTROY ALL DATA on the target. Continue? [y/N] " CONFIRM
 [ "$CONFIRM" != "y" ] && { echo "Aborted."; exit 2; }
@@ -330,7 +402,11 @@ echo ""
 echo "💿 Running nixos-anywhere (partition → install → first-boot files)..."
 echo ""
 
-sudo nix run github:nix-community/nixos-anywhere -- \
+# Enable flakes/nix-command for the nix invocation
+NIX_CONFIG=$'experimental-features = nix-command flakes\naccept-flake-config = true'
+export NIX_CONFIG
+
+sudo NIX_CONFIG="$NIX_CONFIG" nix run github:nix-community/nixos-anywhere -- \
     --flake "$TMP_FLAKE#p51" \
     --extra-files "$EXTRA_DIR" \
     --no-reboot \

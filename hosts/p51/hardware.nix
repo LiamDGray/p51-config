@@ -1,14 +1,20 @@
 # ThinkPad P51 — hardware-specific settings.
 #
-# Auto-generated hardware-configuration.nix equivalents.
-# Run `nixos-generate-config --root /mnt` on the actual machine and
-# merge anything extra from the generated file into this module.
+# nixos-hardware's thinkpad-p51 module is loaded upstream in flake.nix
+# and handles NVIDIA PRIME Optimus (Intel + Quadro), CPU microcode (Kaby
+# Lake), WiFi firmware, and CPU throttling fix (throttled).
+#
+# This file adds P51 quirks that nixos-hardware doesn't cover.
 
 { config, lib, pkgs, ... }:
 
 {
   imports = [
     # nixos-hardware thinkpad-p51 is loaded upstream in flake.nix
+    # It handles NVIDIA PRIME, CPU, WiFi firmware, and throttled.
+    #
+    # We do NOT override services.xserver.videoDrivers here —
+    # nixos-hardware sets it correctly for NVIDIA PRIME sync.
   ];
 
   # ── Kernel & modules ──────────────────────────────
@@ -24,18 +30,7 @@
   # ── CPU microcode ──────────────────────────────────
   hardware.cpu.intel.updateMicrocode = lib.mkDefault true;
 
-  # ── GPU: Intel HD 630 (i915) + NVIDIA Quadro ──────
-  # The P51 has both Intel integrated and NVIDIA discrete.
-  # Options (pick one):
-  #
-  #   (1) Intel only — saves battery, fine for desktop
-  #   (2) NVIDIA only (proprietary) — CUDA, external monitors
-  #   (3) PRIME offload / Optimus — dynamic switching
-  #
-  # Default to Intel-only for reliability. Uncomment
-  # `hardware.nvidia` below to enable the NVIDIA driver.
-  services.xserver.videoDrivers = [ "modesetting" ];
-
+  # ── GPU acceleration (Intel side) ─────────────────
   hardware.graphics = {
     enable = true;
     extraPackages = with pkgs; [
@@ -44,13 +39,12 @@
     ];
   };
 
-  # hardware.nvidia = {
-  #   modesetting.enable = true;
-  #   prime = {
-  #     intelBusId  = "PCI:0:2:0";
-  #     nvidiaBusId = "PCI:1:0:0";
-  #   };
-  # };
+  # ── Fingerprint reader ────────────────────────────
+  # P51 has a Synaptics FS7604 or similar.
+  services.fprintd.enable = true;
+
+  # ── TrackPoint / libinput ─────────────────────────
+  services.libinput.enable = true;
 
   # ── Firmware ───────────────────────────────────────
   hardware.enableRedistributableFirmware = true;

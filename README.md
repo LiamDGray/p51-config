@@ -58,6 +58,24 @@ git clone <url> p51-config
 cd p51-config
 ```
 
+### Drive inventory
+
+When you run `install.sh`, it first scans all NVMe drives and prints a table:
+
+```
+┌─ NVMe Drive Inventory ─────────────────────────────────────────────────────┐
+│ DEVICE         SIZE  MODEL                          NTFS?  PARTITIONS      │
+├────────────────────────────────────────────────────────────────────────────┤
+│ /dev/nvme0n1   238G  SAMSUNG MZVLB256HAHQ-00000    YES    p1:ntfs         │
+│ /dev/nvme1n1   476G  SAMSUNG MZVLB512HAHQ-00000    no     (blank) ← smallest│
+└────────────────────────────────────────────────────────────────────────────┘
+  Smallest: nvme1n1 (238G) → mirror-safe cryptroot ≤ 229G
+```
+
+The smallest drive determines the mirror-safe `cryptroot` limit. If the target
+drive is larger than the smallest, the script auto-calculates a `--cryptroot-size`
+that will fit on both — so you can add a ZFS mirror later.
+
 ### Install
 
 ```bash
@@ -115,6 +133,49 @@ When you add a drive to mirror to:
 
 The ESP on the second drive can be kept as a manual backup — just copy the boot files after the mirror is set up.
 
+## Backups (optional, after first boot)
+
+This repo includes a `modules/backups.nix` that sets up **Restic** with systemd
+timers — nightly backup, weekly deep verify, monthly restore drill.
+
+**You need to provide credentials** in an env file on the installed system:
+
+```bash
+# On the installed system, create:
+sudo mkdir -p /etc/restic
+sudo vi /etc/restic/r2.env
+```
+
+```bash
+# r2.env — example for Cloudflare R2
+export RESTIC_REPOSITORY=rclone:r2:my-bucket/p51
+export RESTIC_PASSWORD=your-strong-backup-password
+export RCLONE_CONFIG_R2_TYPE=s3
+export RCLONE_CONFIG_R2_PROVIDER=Cloudflare
+export RCLONE_CONFIG_R2_ENDPOINT=https://<account-id>.r2.cloudflarestorage.com
+export RCLONE_CONFIG_R2_ACCESS_KEY_ID=...
+export RCLONE_CONFIG_R2_SECRET_ACCESS_KEY=...
+```
+
+```bash
+# Initialize the repo
+sudo -E restic -r "$(grep ^RESTIC_REPOSITORY /etc/restic/r2.env | cut -d= -f2-)" init
+
+# Test
+sudo systemctl start restic-backup-r2
+sudo journalctl -u restic-backup-r2 -f
+```
+
+The timers run automatically:
+| Timer | Schedule |
+|---|---|
+| `restic-backup-r2` | Nightly at 3:00 AM |
+| `restic-verify-deep` | Sunday 4:00 AM |
+| `restic-restore-drill` | Sunday 5:00 AM (monthly) |
+
+`/etc/restic` is persisted via impermanence. To add a second backup target
+(Backblaze B2, etc.), see the commented-out blocks in `modules/backups.nix`.
+
 ## Customizing
 
 | File | What to change |
@@ -124,6 +185,7 @@ The ESP on the second drive can be kept as a manual backup — just copy the boo
 | `hosts/p51/default.nix` | Device path (after install), hostId |
 | `modules/users.nix` | SSH keys, extra users |
 | `modules/impermanence.nix` | Which paths survive reboots |
+| `modules/backups.nix` | Restic backup timers (R2, env-file based) |
 | `modules/networking.nix` | Firewall rules, DNS |
 | `modules/services.nix` | Enabled system services |
 
