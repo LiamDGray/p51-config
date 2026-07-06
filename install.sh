@@ -19,12 +19,12 @@ SCRIPT_DIR="$(cd "$(dirname "$0")" && pwd)"
 # ═════════════════════════════════════════════════════════
 
 MISSING=""
-for cmd in lsblk readlink basename realpath python3 nix sudo; do
+for cmd in lsblk readlink basename realpath python3 nix sudo mkpasswd; do
     command -v "$cmd" &>/dev/null || MISSING="$MISSING $cmd"
 done
 if [ -n "$MISSING" ]; then
     echo "❌ Missing required tools:$MISSING"
-    echo "   On the NixOS live USB, run: nix-shell -p python3"
+    echo "   On the NixOS live USB, run: nix-shell -p python3 mkpasswd"
     exit 1
 fi
 if [ "$(id -u)" -ne 0 ]; then
@@ -389,6 +389,24 @@ echo ""
 read -rp "⚠️  This will DESTROY ALL DATA on the target. Continue? [y/N] " CONFIRM
 [ "$CONFIRM" != "y" ] && { echo "Aborted."; exit 2; }
 
+# Prompt for liam's password
+echo ""
+while true; do
+    read -rs -p "Enter new password for user 'liam': " LIAM_PASS
+    echo
+    read -rs -p "Retype new password: " LIAM_PASS2
+    echo
+    if [ "$LIAM_PASS" = "$LIAM_PASS2" ]; then
+        if [ -n "$LIAM_PASS" ]; then
+            break
+        else
+            echo "❌ Password cannot be empty."
+        fi
+    else
+        echo "❌ Passwords do not match. Try again."
+    fi
+done
+
 # ═════════════════════════════════════════════════════════
 #  Phase 5b: Force-wipe target (if --force)
 # ═════════════════════════════════════════════════════════
@@ -469,6 +487,11 @@ fi
 # /etc/NetworkManager connections directory
 mkdir -p "$EXTRA_DIR/persist/etc/NetworkManager/system-connections"
 
+# Password hash for liam
+mkpasswd -m sha-512 -s <<< "$LIAM_PASS" > "$EXTRA_DIR/persist/etc/shadow-liam"
+chmod 600 "$EXTRA_DIR/persist/etc/shadow-liam"
+echo "  🔑 Generated password hash in extra-files"
+
 # User home skeleton
 mkdir -p "$EXTRA_DIR/persist/home/liam/.ssh"
 chmod 700 "$EXTRA_DIR/persist/home/liam/.ssh"
@@ -498,8 +521,7 @@ echo "✅ Install complete!"
 echo ""
 echo "   Next steps:"
 echo "   ─────────────────────────────────────────────"
-echo "   1. Set password:  sudo passwd liam"
-echo "   2. Reboot:        sudo reboot"
+echo "   1. Reboot:  sudo reboot"
 echo "   ─────────────────────────────────────────────"
 echo ""
 echo "   📝 After reboot, update the real hosts/p51/default.nix:"

@@ -4,6 +4,7 @@
   # ── User: liam ────────────────────────────────────
   users.users.liam = {
     isNormalUser = true;
+    hashedPasswordFile = "/persist/etc/shadow-liam";
     extraGroups = [
       "wheel"
       "networkmanager"
