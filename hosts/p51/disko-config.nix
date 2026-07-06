@@ -27,7 +27,8 @@
               content = {
                 type = "luks";
                 name = "cryptswap";
-                settings.keyFile = "/dev/urandom";
+                passwordFile = "/tmp/swap.key";
+                settings.allowDiscards = true;
                 content = {
                   type = "swap";
                   discardPolicy = "both";

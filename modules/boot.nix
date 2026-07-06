@@ -17,8 +17,6 @@
   };
 
   # ── Kernel ────────────────────────────────────────
-  # linuxPackages_latest is set in hardware.nix as default.
-  # For ZFS compatibility, pin to the default kernel if latest lags.
   boot.kernelParams = [
     "quiet"                           # Less boot spam
     "splash"                          # Plymouth splash
@@ -27,4 +25,13 @@
 
   # ── Plymouth (boot splash) ────────────────────────
   boot.plymouth.enable = true;
+
+  # ── cryptswap: random key on every boot ──────────
+  # The LUKS was formatted with a one-time key during install.
+  # At boot, initrd uses /dev/urandom to derive a fresh key,
+  # making swap contents irrecoverable across reboots.
+  boot.initrd.luks.devices.cryptswap = {
+    keyFile = "/dev/urandom";
+    allowDiscards = true;
+  };
 }
