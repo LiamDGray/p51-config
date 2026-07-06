@@ -488,7 +488,7 @@ fi
 mkdir -p "$EXTRA_DIR/persist/etc/NetworkManager/system-connections"
 
 # Password hash for liam
-mkpasswd -m sha-512 -s <<< "$LIAM_PASS" > "$EXTRA_DIR/persist/etc/shadow-liam"
+printf '%s' "$LIAM_PASS" | mkpasswd -m sha-512 > "$EXTRA_DIR/persist/etc/shadow-liam"
 chmod 600 "$EXTRA_DIR/persist/etc/shadow-liam"
 echo "  🔑 Generated password hash in extra-files"
 
