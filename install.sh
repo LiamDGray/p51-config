@@ -152,11 +152,71 @@ show_drive_inventory() {
 }
 
 # ═════════════════════════════════════════════════════════
+#  Force-wipe helpers
+# ═════════════════════════════════════════════════════════
+
+force_wipe() {
+    local disk="$1"
+    local name
+    name=$(basename "$disk")
+    echo "⚠️  --force: wiping existing data on $name..."
+
+    # Destroy any ZFS pool on partitions of this disk
+    for pool in $(zpool list -H -o name 2>/dev/null || true); do
+        if zpool status -P "$pool" 2>/dev/null | grep -qP "/dev/${name}p?\d+"; then
+            echo "  Destroying ZFS pool: $pool"
+            zpool destroy "$pool" || true
+        fi
+    done
+
+    # Close LUKS containers backed by this disk
+    for mapper in cryptroot cryptswap; do
+        if [ -e "/dev/mapper/$mapper" ]; then
+            local src
+            src=$(cryptsetup status "$mapper" 2>/dev/null | grep "device:" | awk '{print $2}')
+            if echo "$src" | grep -q "$name"; then
+                echo "  Closing LUKS: $mapper"
+                cryptsetup close "$mapper" || true
+            fi
+        fi
+    done
+
+    # Wipe partition table and all filesystem signatures
+    echo "  Wiping partition table and filesystem signatures..."
+    wipefs -a "$disk"
+    echo "  ✅ Target disk wiped."
+}
+
+# ═════════════════════════════════════════════════════════
+#  SSH setup for local nixos-anywhere
+# ═════════════════════════════════════════════════════════
+
+setup_local_ssh() {
+    # Ensure sshd is running
+    if ! systemctl is-active --quiet sshd 2>/dev/null; then
+        echo "  Starting sshd..."
+        systemctl start sshd
+    fi
+
+    # Generate a throwaway SSH key for the local install
+    SSH_KEY="/tmp/nixos-anywhere-key"
+    if [ ! -f "$SSH_KEY" ]; then
+        ssh-keygen -t ed25519 -f "$SSH_KEY" -N "" -q
+    fi
+
+    # Authorize it to root's authorized_keys
+    mkdir -p ~root/.ssh
+    cat "$SSH_KEY.pub" >> ~root/.ssh/authorized_keys
+    chmod 600 ~root/.ssh/authorized_keys
+}
+
+# ═════════════════════════════════════════════════════════
 #  Phase 1: Parse arguments
 # ═════════════════════════════════════════════════════════
 
 ARG_DEVICE=""
 ARG_CRYPTROOT_SIZE=""
+ARG_FORCE=0
 
 while [ $# -gt 0 ]; do
     case "$1" in
@@ -165,8 +225,12 @@ while [ $# -gt 0 ]; do
             ARG_CRYPTROOT_SIZE="$2"
             shift 2
             ;;
+        --force|-f)
+            ARG_FORCE=1
+            shift
+            ;;
         --help|-h)
-            echo "Usage: $0 [device] [--cryptroot-size SIZE]"
+            echo "Usage: $0 [device] [--cryptroot-size SIZE] [--force]"
             exit 0
             ;;
         -*)
@@ -326,6 +390,20 @@ read -rp "⚠️  This will DESTROY ALL DATA on the target. Continue? [y/N] " CO
 [ "$CONFIRM" != "y" ] && { echo "Aborted."; exit 2; }
 
 # ═════════════════════════════════════════════════════════
+#  Phase 5b: Force-wipe target (if --force)
+# ═════════════════════════════════════════════════════════
+
+if [ "$ARG_FORCE" -eq 1 ]; then
+    force_wipe "$TARGET_DISK"
+fi
+
+# ═════════════════════════════════════════════════════════
+#  Phase 5c: Set up local SSH for nixos-anywhere
+# ═════════════════════════════════════════════════════════
+
+setup_local_ssh
+
+# ═════════════════════════════════════════════════════════
 #  Phase 6: Build temp flake with overridden device path
 #  nixos-anywhere reads the disko config from the flake,
 #  so we create a copy of our flake with the correct
@@ -357,6 +435,7 @@ cat > "$TMP_FLAKE/hosts/p51/default.nix" << FLAKE_NIX
     ../../modules/services.nix
     ../../modules/users.nix
     ../../modules/impermanence.nix
+    ../../modules/backups.nix
   ];
   networking.hostName = "p51";
   networking.hostId = "deadbeef";
@@ -409,7 +488,9 @@ export NIX_CONFIG
 sudo NIX_CONFIG="$NIX_CONFIG" nix run github:nix-community/nixos-anywhere -- \
     --flake "$TMP_FLAKE#p51" \
     --extra-files "$EXTRA_DIR" \
-    --no-reboot \
+    --ssh-key "$SSH_KEY" \
+    --target-host root@localhost \
+    --phases disko,install \
     2>&1 || die "nixos-anywhere failed"
 
 echo ""
