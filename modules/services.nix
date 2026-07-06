@@ -38,6 +38,15 @@
     jack.enable = false;
   };
 
+  # ── Encrypted swap ───────────────────────────────
+  # Raw swap partition, encrypted at boot with a random key
+  # via plain dm-crypt. Contents are irrecoverable after reboot.
+  swapDevices = lib.mkForce [{
+    device = "/dev/disk/by-partlabel/disk-nvme0-cryptswap";
+    randomEncryption.enable = true;
+    discardPolicy = "both";
+  }];
+
   # ── Bluetooth ────────────────────────────────────
   hardware.bluetooth.enable = true;
   services.blueman.enable = true;

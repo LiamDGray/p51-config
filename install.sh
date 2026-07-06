@@ -404,12 +404,6 @@ fi
 setup_local_ssh
 
 # ═════════════════════════════════════════════════════════
-#  Phase 5d: Generate swap key for disko
-# ═════════════════════════════════════════════════════════
-
-dd if=/dev/urandom of=/tmp/swap.key bs=4096 count=1 2>/dev/null
-
-# ═════════════════════════════════════════════════════════
 #  Phase 6: Build temp flake with overridden device path
 #  nixos-anywhere reads the disko config from the flake,
 #  so we create a copy of our flake with the correct

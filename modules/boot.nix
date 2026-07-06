@@ -25,13 +25,4 @@
 
   # ── Plymouth (boot splash) ────────────────────────
   boot.plymouth.enable = true;
-
-  # ── cryptswap: random key on every boot ──────────
-  # The LUKS was formatted with a one-time key during install.
-  # At boot, initrd uses /dev/urandom to derive a fresh key,
-  # making swap contents irrecoverable across reboots.
-  boot.initrd.luks.devices.cryptswap = {
-    keyFile = "/dev/urandom";
-    allowDiscards = true;
-  };
 }

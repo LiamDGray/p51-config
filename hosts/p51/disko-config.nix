@@ -25,15 +25,8 @@
               size = "8G";
               type = "8200"; # Linux swap
               content = {
-                type = "luks";
-                name = "cryptswap";
-                passwordFile = "/tmp/swap.key";
-                settings.allowDiscards = true;
-                content = {
-                  type = "swap";
-                  discardPolicy = "both";
-                  priority = 100;
-                };
+                type = "swap";
+                discardPolicy = "both";
               };
             };
             cryptroot = {
